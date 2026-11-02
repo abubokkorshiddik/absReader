@@ -2832,6 +2832,16 @@ html[data-theme=dark] #rv{--rvbg:#12151d;--rvfg:#e2e2e2}
   window.addEventListener("keydown", e => { if (e.key === "Escape") closeMore(); });
   window.ReaderAPI.openDoc = openDoc; window.ReaderAPI.showHome = showHome;
 
+/* Open PDFs handed over by the operating system (file_handlers) */
+if ("launchQueue" in window) {
+  launchQueue.setConsumer(async lp => {
+    if (!lp.files || !lp.files.length) return;
+    const files = [];
+    for (const h of lp.files) { try { files.push(await h.getFile()); } catch (e) {} }
+    if (files.length) uploadFiles(files);
+  });
+}
+  
   /* Boot */
   renderTabs();
   const hasParam = !!(localId || BOOKS[params.get("b")]);
