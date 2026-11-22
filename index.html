@@ -5531,6 +5531,160 @@ if ("launchQueue" in window) {
   window.ReaderStudy = { open: openStudy, close: closeStudy, lookup, ask, autoscroll: autoToggle };
 })();
 
+
+
+
+
+/* reader-extras.js — add-on for Absolute Reader (reader.html)
+   Paste inside <script>…</script> just before </body>, AFTER the existing scripts.
+   1. Press-and-hold then drag the bottom-left buttons (view / hand / pen) anywhere. Position is remembered.
+   2. Press-and-hold then drag a hidden-image icon (🖼) to move it.
+   3. Image toolbar gets Rotate left / right (90°). Rotation is baked into the image, so it exports to the PDF.
+   4. LaTeX: write $x^2$ or $$\int_0^1 x\,dx$$ in comments and notes. Live preview in the editor, rendered in the Notes list.
+*/
+(function () {
+  "use strict";
+  const A = () => window.ReaderAPI;
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const lsGet = k => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+  const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
+  const css = document.createElement("style");
+  css.textContent = "#fab{touch-action:none}#fab.moving{transition:none;opacity:1 !important}#fab.moving .fb{box-shadow:0 0 0 3px var(--accent)}" +
+    ".imp.moving{box-shadow:0 0 0 3px #fff,0 0 0 6px var(--accent);cursor:grabbing}" +
+    "#edPrev{margin:8px 0;padding:8px 10px;border:1px dashed var(--line);border-radius:8px;max-height:30vh;overflow:auto;line-height:1.6;font-weight:500}" +
+    ".ni .n .katex-display{margin:.4em 0}";
+  document.head.appendChild(css);
+
+  /* ---------- swallow the click that follows a drag ---------- */
+  let noClickUntil = 0;
+  document.addEventListener("click", e => { if (Date.now() < noClickUntil) { e.stopImmediatePropagation(); e.preventDefault(); } }, true);
+
+  /* ---------- generic press-and-hold drag ---------- */
+  function holdDrag(getTarget, onStart, onMove, onEnd) {
+    let st = null;
+    document.addEventListener("pointerdown", e => {
+      const t = getTarget(e); if (!t || (e.pointerType === "mouse" && e.button !== 0)) return;
+      st = { id: e.pointerId, x: e.clientX, y: e.clientY, t, on: false };
+      st.timer = setTimeout(() => { st.on = true; onStart(st, e); try { navigator.vibrate && navigator.vibrate(12); } catch (x) {} }, 350);
+    }, true);
+    document.addEventListener("pointermove", e => {
+      if (!st || e.pointerId !== st.id) return;
+      if (!st.on) { if (Math.hypot(e.clientX - st.x, e.clientY - st.y) > 8) { clearTimeout(st.timer); st = null; } return; }
+      e.preventDefault(); onMove(st, e);
+    }, { passive: false, capture: true });
+    const end = e => {
+      if (!st || e.pointerId !== st.id) return;
+      clearTimeout(st.timer); const s = st; st = null;
+      if (s.on) { noClickUntil = Date.now() + 350; onEnd(s, e); }
+    };
+    document.addEventListener("pointerup", end, true);
+    document.addEventListener("pointercancel", end, true);
+  }
+
+  /* ---------- 1. movable floating buttons ---------- */
+  const fab = $("fab");
+  function placeFab(l, t) {
+    const w = fab.offsetWidth || 42, h = fab.offsetHeight || 42;
+    l = Math.max(4, Math.min(window.innerWidth - w - 4, l)); t = Math.max(4, Math.min(window.innerHeight - h - 4, t));
+    fab.style.left = l + "px"; fab.style.top = t + "px"; fab.style.bottom = "auto"; return [l, t];
+  }
+  if (fab) {
+    try { const p = JSON.parse(lsGet("fabpos") || "null"); if (p) placeFab(p[0], p[1]); } catch (e) {}
+    window.addEventListener("resize", () => { try { const p = JSON.parse(lsGet("fabpos") || "null"); if (p) placeFab(p[0], p[1]); } catch (e) {} });
+    holdDrag(e => e.target.closest && e.target.closest("#fab"),
+      (s, e) => { const r = fab.getBoundingClientRect(); s.ox = e.clientX - r.left; s.oy = e.clientY - r.top; fab.classList.add("moving"); try { fab.setPointerCapture(e.pointerId); } catch (x) {} A() && A().flash("Drag to move the buttons"); },
+      (s, e) => { s.pos = placeFab(e.clientX - s.ox, e.clientY - s.oy); },
+      s => { fab.classList.remove("moving"); if (s.pos) lsSet("fabpos", JSON.stringify(s.pos)); });
+    window.__resetFab = () => { try { localStorage.removeItem("fabpos"); } catch (e) {} fab.style.left = fab.style.top = fab.style.bottom = ""; };
+  }
+
+  /* ---------- 2. movable hidden-image icons ---------- */
+  holdDrag(e => e.target.closest && e.target.closest(".imp"),
+    (s, e) => { s.btn = s.t.closest(".imp"); s.q = s.btn.closest(".imq"); s.pg = s.btn.closest(".pg"); s.a = A().anns.find(x => x.id === s.btn.dataset.id); s.btn.classList.add("moving"); try { s.btn.setPointerCapture(e.pointerId); } catch (x) {} },
+    (s, e) => {
+      if (!s.a || !s.pg) return; const r = s.pg.getBoundingClientRect();
+      s.a.x = +Math.max(0, Math.min(1 - s.a.w, (e.clientX - r.left) / r.width - s.a.w / 2)).toFixed(4);
+      s.a.y = +Math.max(0, Math.min(0.97, (e.clientY - r.top) / r.height - 0.02)).toFixed(4);
+      s.q.style.left = s.a.x * 100 + "%"; s.q.style.top = s.a.y * 100 + "%";
+    },
+    s => { s.btn.classList.remove("moving"); if (s.a) A().setAnns(A().anns); });
+
+  /* ---------- 3. rotate images (90°, baked into the pixels) ---------- */
+  function addRotButtons() {
+    document.querySelectorAll(".im .imm:not([data-xr])").forEach(m => {
+      m.dataset.xr = "1";
+      m.insertAdjacentHTML("afterbegin", '<button type="button" data-xrot="-90" title="Rotate left" aria-label="Rotate left">⟲</button><button type="button" data-xrot="90" title="Rotate right" aria-label="Rotate right">⟳</button>');
+    });
+  }
+  let raf = 0;
+  new MutationObserver(() => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; addRotButtons(); fillNotes(); }); }).observe(document.body, { childList: true, subtree: true });
+  async function rotateImg(id, deg) {
+    const api = A(), a = api.anns.find(x => x.id === id); if (!a) return;
+    try {
+      const rec = await api.imgGet(a.img); if (!rec) { api.flash("Image data not found"); return; }
+      const bmp = await createImageBitmap(rec.blob), cv = document.createElement("canvas");
+      cv.width = bmp.height; cv.height = bmp.width;
+      const c = cv.getContext("2d"); c.translate(cv.width / 2, cv.height / 2); c.rotate(deg * Math.PI / 180); c.drawImage(bmp, -bmp.width / 2, -bmp.height / 2);
+      const type = rec.blob.type === "image/png" ? "image/png" : "image/jpeg";
+      const blob = await new Promise(r => cv.toBlob(r, type, 0.9)); if (!blob) throw new Error("encode");
+      const nid = "im" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+      await api.imgPut(nid, { blob, w: cv.width, h: cv.height, t: Date.now() });
+      a.ar = +(1 / (a.ar || rec.w / rec.h)).toFixed(5); a.img = nid; delete a.orig;
+      api.setAnns(api.anns);
+      setTimeout(() => { const el = document.querySelector('.im[data-id="' + id + '"]'); if (el) el.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })); }, 60);
+    } catch (e) { console.error(e); api.flash("Could not rotate that image"); }
+  }
+  document.addEventListener("click", e => {
+    const b = e.target.closest && e.target.closest("[data-xrot]"); if (!b) return;
+    e.stopImmediatePropagation(); e.preventDefault();
+    const im = b.closest(".im"); if (im) rotateImg(im.dataset.id, +b.dataset.xrot);
+  }, true);
+
+  /* ---------- 4. LaTeX ($...$ and $$...$$) ---------- */
+  let kx = null;
+  function loadKatex() {
+    if (window.katex) return Promise.resolve();
+    if (kx) return kx;
+    kx = new Promise((res, rej) => {
+      const l = document.createElement("link"); l.rel = "stylesheet"; l.href = "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css"; document.head.appendChild(l);
+      const s = document.createElement("script"); s.src = "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"; s.onload = res; s.onerror = () => { kx = null; rej(); };
+      document.head.appendChild(s);
+    });
+    return kx;
+  }
+  function tex(s) {
+    const re = /\$\$([\s\S]+?)\$\$|\$([^$\n]+?)\$/g; let out = "", i = 0, m;
+    const plain = t => esc(t).replace(/\n/g, "<br>");
+    while ((m = re.exec(s))) {
+      out += plain(s.slice(i, m.index)); const d = m[1] != null;
+      try { out += window.katex.renderToString(d ? m[1] : m[2], { displayMode: d, throwOnError: false }); } catch (e) { out += esc(m[0]); }
+      i = re.lastIndex;
+    }
+    return out + plain(s.slice(i));
+  }
+  const hasTex = s => /\$[^$]+\$/.test(s || "");
+  /* editor preview */
+  const edT = $("edT");
+  if (edT) {
+    const prev = document.createElement("div"); prev.id = "edPrev"; prev.hidden = true; edT.insertAdjacentElement("afterend", prev);
+    const upd = async () => {
+      if (!hasTex(edT.value)) { prev.hidden = true; return; }
+      try { await loadKatex(); prev.innerHTML = tex(edT.value); prev.hidden = false; } catch (e) { prev.hidden = true; }
+    };
+    edT.addEventListener("input", upd);
+    new MutationObserver(upd).observe($("ed"), { attributes: true, attributeFilter: ["class"] });
+  }
+  /* notes list */
+  async function fillNotes() {
+    const els = [...document.querySelectorAll("#dBody .ni .n:not([data-tx]), #dBody .ni q:not([data-tx])")].filter(x => hasTex(x.textContent));
+    if (!els.length) return;
+    try { await loadKatex(); } catch (e) { return; }
+    els.forEach(x => { x.dataset.tx = "1"; x.innerHTML = tex(x.textContent); });
+  }
+})();
+
+  
 </script>
 </body>
 </html>
